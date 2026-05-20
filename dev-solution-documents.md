@@ -224,23 +224,113 @@
 | DeliveryChannel  | абстрагирует параметры подключения и конфигурацию внешних каналов связи (email, SFTP). |
 | ProcessingHistory  | иммутабельный журнал всех значимых событий жизненного цикла документа для аудита, отладки и восстановления состояния |
 
-<img width="4483" height="3475" alt="mermaid-1779278549029" src="https://github.com/user-attachments/assets/6638b5ad-8821-4c32-8082-7a1a2ca60366" />
+```mermaid
+erDiagram
+    %% Core entities
+    Document ||--o{ ProcessingTask : "has tasks"
+    Document ||--o{ ProcessingHistory : "generates events"
+    Document ||--o{ ArchiveMetadata : "can be archived"
+    Document }|--|| ProcessingRoute : "follows route"
+    
+    %% Task relationships
+    ProcessingTask }|--|| Document : "processes"
+    ProcessingTask ||--o{ ProcessingHistory : "produces events"
+    
+    %% Archive relationships
+    ArchiveMetadata }|--|| Document : "contains files"
+    ArchiveMetadata ||--o{ Document : "generates child docs"
+    
+    %% Channel relationships
+    ProcessingRoute }|--|| DeliveryChannel : "uses channel for output"
+    Document }|--|| DeliveryChannel : "received via"
+    Document }|--|| DeliveryChannel : "sent via"
+    
+    %% Idempotency
+    Document {
+        uuid document_id PK
+        string external_id
+        enum document_type
+        string file_hash "SHA256, dedup"
+        string idempotency_key "UNIQUE"
+        enum status
+        jsonb metadata
+    }
+    
+    ProcessingTask {
+        uuid task_id PK
+        uuid document_id FK
+        enum task_type
+        enum status
+        string idempotency_key "UNIQUE"
+        int retry_count
+    }
+    
+    ProcessingHistory {
+        uuid event_id PK
+        uuid document_id FK
+        enum event_type
+        timestamp event_timestamp
+        jsonb payload
+        uuid correlation_id
+    }
+    
+    ArchiveMetadata {
+        uuid archive_id PK
+        enum archive_type
+        int total_parts
+        jsonb files_manifest
+        enum reassembly_status
+    }
+    
+    DeliveryChannel {
+        uuid channel_id PK
+        enum channel_type
+        jsonb config
+        enum health_status
+        int rate_limit_per_min
+    }
+```
 
 ### Идемпотентность и дедупликация
 Система предотвращает дублирование обработки на трёх уровнях: (1) при приёме документа — по комбинации file_hash + `sender_id` + timestamp; (2) при выполнении операций — через idempotency_key и атомарную вставку INSERT ... ON CONFLICT; (3) при отправке — по уникальному ключу (channel_id, recipient, message_hash). Это гарантирует, что каждый документ и каждая операция будут обработаны ровно один раз, даже при повторных запросах или сбоях сети.
 При повторном обращении система возвращает результат предыдущего успешного выполнения, а не запускает обработку заново. Такой подход обеспечивает семантику «точно один раз» на бизнес-уровне, сохраняя устойчивость к ретраям и временной недоступности внешних каналов.
 
 Пример  обработки документа с идемпотентностью.
-<img width="5649" height="3327" alt="mermaid-1779278589792" src="https://github.com/user-attachments/assets/f098b64c-12cf-4205-a791-281fc0d2b6c6" />
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as API Gateway
+    participant DocSvc as Document Service
+    participant DB as PostgreSQL (Sharded)
+    participant Cache as Redis Cluster
+    participant Queue as Kafka
 
-### Шардирование для балансировки нагрузки
-Поскольку 95% запросов в системе выполняются по document_id, такая стратегия минимизирует кросс-шардовые переходы и обеспечивает линейное масштабирование при росте нагрузки.
+    Client->>API: POST /documents (file, metadata, Idempotency-Key)
+    API->>DocSvc: Validate & process document
+    
+    DocSvc->>DB: BEGIN TRANSACTION
+    DocSvc->>DB: INSERT INTO document (...) 
+    DocSvc->>DB: ON CONFLICT (idempotency_key) DO UPDATE...
+    
+    alt Document is duplicate
+        DB-->>DocSvc: Return existing document_id & status
+        DocSvc-->>API: 200 OK (cached response)
+        API-->>Client: Return previous result
+    else New document
+        DocSvc->>DB: COMMIT
+        DocSvc->>Cache: SET doc:status:{id} = RECEIVED (TTL)
+        DocSvc->>Queue: Publish event: DOCUMENT_RECEIVED
+        
+        par Parallel processing
+            DocSvc->>Queue: Enqueue validation task
+            DocSvc->>Queue: Enqueue routing decision task
+        end
+        
+        DocSvc-->>API: 202 Accepted (document_id, correlation_id)
+        API-->>Client: Return tracking info
+    end
+```
 
-1. Стратегия: Шардирование выполняется по document_id (UUID v7 с временной меткой в старших битах). Ключ шарда вычисляется как hash(document_id) % N, где N — текущее количество шардов. UUID v7 обеспечивает равномерное распределение и лексикографическую сортировку по времени, что упрощает выборки по периодам.
-2. Структура: Каждый шард — независимый экземпляр PostgreSQL с идентичной схемой. Таблицы document, processing_task, archive_metadata шардируются; конфигурационные данные (processing_route, delivery_channel) реплицируются на все шарды или выносятся в отдельное хранилище. Журнал processing_history партиционируется по времени внутри каждого шарда для эффективного архивирования.
-3. Маршрутизация запросов: Router-слой (или клиентская библиотека) вычисляет шард по document_id и направляет запрос напрямую.
-4. Кросс-шардовые запросы: Избегаются на уровне бизнес-логики; агрегации выполняются асинхронно через материализованные представления или выносятся в аналитическое хранилище (ClickHouse).
-5. Ребалансировка: При добавлении новых шардов используется консистентный хеширование для минимизации перемещения данных; миграция выполняется фоново в периоды низкой нагрузки.
 
 ---
 
@@ -251,22 +341,56 @@
 
 ### Архитектурная схема
 
-<img width="6417" height="3162" alt="mermaid-1779278688612" src="https://github.com/user-attachments/assets/c50a11ab-1a78-4081-8182-0dd3ae94ee11" />
+```mermaid
+graph TB
+    subgraph "Внешние системы"
+        EmailIn[📧 Email In]
+        SFTPIn[📁 SFTP In]
+        EmailOut[📧 Email Out]
+        SFTPOut[📁 SFTP Out]
+    end
 
+    LB[Load Balancer] --> API[API Gateway]
+    
+    subgraph "Приём"
+        EmailIn --> Receiver[Receiver Service]
+        SFTPIn --> Receiver
+        Receiver --> Validator[Validator & Classifier]
+    end
+
+    Validator --> Kafka{Kafka}
+    
+    subgraph "Обработка"
+        Kafka --> RouteEngine[Routing Engine]
+        RouteEngine --> Workers[Task Workers Pool]
+        Workers --> Sign[Signing]
+        Workers --> Encrypt[Encryption]
+        Workers --> Archive[Archive Service]
+    end
+
+    subgraph "Отправка"
+        Workers --> Delivery[Delivery Manager]
+        Delivery --> EmailOut
+        Delivery --> SFTPOut
+    end
+
+    subgraph "Хранилища"
+        DB[(PostgreSQL<br/>Sharded)]
+        Cache[(Redis)]
+        Storage[(S3)]
+        Analytics[(ClickHouse)]
+    end
+
+    RouteEngine --> DB & Cache
+    Workers --> DB & Storage
+    Workers -.-> Analytics
+```
 ### Схема данных 
 <img width="3417" height="2343" alt="mermaid-1779279099698" src="https://github.com/user-attachments/assets/56bba309-0f3b-44b1-a7a5-e619253b6187" />
 
 ### Масштабирование и отказоустойчивость
 
-Стратегия шардирования: hash(document_id) % N_shards для PostgreSQL. Каждый шард — независимый кластер с репликами. 
-Паттерны устойчивости:
-
-    Retry с exponential backoff (3 попытки → DLQ)
-    Circuit Breaker для внешних каналов (5 ошибок → pause 30s)
-    Bulkhead — изоляция ресурсов по типам операций
-    Timeouts: API 30s, БД 10s, внешние сервисы 60s
-
-RPO/RTO: 5 минут / 15 минут за счёт репликации БД и cross-region S3.
+RPO/RTO: 5 минут / 
 
 ### Безопасность
 
