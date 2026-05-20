@@ -386,8 +386,26 @@ graph TB
     Workers -.-> Analytics
 ```
 ### Схема данных 
-<img width="3417" height="2343" alt="mermaid-1779279099698" src="https://github.com/user-attachments/assets/56bba309-0f3b-44b1-a7a5-e619253b6187" />
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API
+    participant Kafka
+    participant Worker
+    participant Storage
 
+    Client->>API: POST /documents
+    API->>API: Validate + idempotency_key
+    API->>Storage: Save file (S3)
+    API->>Kafka: Publish document.incoming
+    API-->>Client: 202 Accepted
+    
+    Kafka->>Worker: Consume task
+    Worker->>Worker: Process (sign/encrypt/archive)
+    Worker->>Storage: Save result
+    Worker->>Kafka: Publish events.history
+    Worker->>Worker: Send via email/SFTP
+```
 ### Масштабирование и отказоустойчивость
 
 RPO/RTO: 5 минут / 
