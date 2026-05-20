@@ -254,7 +254,7 @@
 <img width="6417" height="3162" alt="mermaid-1779278688612" src="https://github.com/user-attachments/assets/c50a11ab-1a78-4081-8182-0dd3ae94ee11" />
 
 ### Схема данных 
-<img width="3417" height="2343" alt="mermaid-1779140117538" src="https://github.com/user-attachments/assets/39184ff9-10a5-4e6b-8fd0-64e72da25bdc" />
+<img width="3417" height="2343" alt="mermaid-1779279099698" src="https://github.com/user-attachments/assets/56bba309-0f3b-44b1-a7a5-e619253b6187" />
 
 ### Масштабирование и отказоустойчивость
 
