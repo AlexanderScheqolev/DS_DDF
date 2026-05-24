@@ -301,7 +301,7 @@ sequenceDiagram
     participant Client
     participant API as API Gateway
     participant DocSvc as Document Service
-    participant DB as PostgreSQL (Sharded)
+    participant DB as PostgreSQL
     participant Cache as Redis Cluster
     participant Queue as Kafka
 
@@ -375,7 +375,7 @@ graph TB
     end
 
     subgraph "Хранилища"
-        DB[(PostgreSQL<br/>Sharded)]
+        DB[(PostgreSQL)]
         Cache[(Redis)]
         Storage[(S3)]
         Analytics[(ClickHouse)]
