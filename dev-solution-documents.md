@@ -399,7 +399,7 @@ sequenceDiagram
     participant Kafka
     participant Router
     participant Worker
-    participant Crypto Sign Archive
+    participant Crypto
     participant Storage
 
     Client->>API: POST /documents {file, idempotency_key}
@@ -416,18 +416,18 @@ sequenceDiagram
     Worker->>Worker: Status: MESSAGE_PREPARED
     
     opt SIGN required
-        Worker->>Crypto Sign Archive: SIGN(payload, key_ref)
-        Crypto Sign Archive-->>Worker: signed_payload
+        Worker->>Crypto: SIGN(payload, key_ref)
+        Crypto-->>Worker: signed_payload
     end
     
     opt ENC required
         Worker->>Crypto: ENCRYPT(payload, pubkey)
-        Crypto Sign Archive-->>Worker: encrypted_payload
+        Crypto-->>Worker: encrypted_payload
     end
     
     opt ARCHIVE required
-        Worker->>Crypto Sign Archive: ARCHIVE(payload, split=true)
-        Crypto Sign Archive-->>Worker: archive.zip[.001, .002...]
+        Worker->>Crypto: ARCHIVE(payload, split=true)
+        Crypto-->>Worker: archive.zip[.001, .002...]
     end
     
     Worker->>Storage: Save processed result
@@ -444,7 +444,7 @@ RPO/RTO: 5 минут /
 
 ### Безопасность
 
-    **Единое управление ключами**:
+    Единое управление ключами:
        - Приватные ключи для подписи хранятся в HashiCorp Vault с доступом только для этого сервиса.
        - Публичные ключи получателей кэшируются в Redis с TTL 1 час (вспомогательное использование).
        - Ротация ключей выполняется централизованно через Vault, без перезапуска сервисов.
