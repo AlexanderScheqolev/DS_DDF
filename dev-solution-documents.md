@@ -230,7 +230,7 @@ erDiagram
     Document ||--o{ ProcessingTask : "has tasks"
     Document ||--o{ ProcessingHistory : "generates events"
     Document ||--o{ ArchiveMetadata : "can be archived"
-    Document }|--|| ProcessingRoute : "follows route"
+    Document }|--|| DeliveryChannel : "uses chanenel for output"
     
     %% Task relationships
     ProcessingTask }|--|| Document : "processes"
@@ -241,7 +241,6 @@ erDiagram
     ArchiveMetadata ||--o{ Document : "generates child docs"
     
     %% Channel relationships
-    ProcessingRoute }|--|| DeliveryChannel : "uses channel for output"
     Document }|--|| DeliveryChannel : "received via"
     Document }|--|| DeliveryChannel : "sent via"
     
@@ -344,6 +343,8 @@ graph TB
         SFTPIn[📁 SFTP In]
         EmailOut[📧 Email Out]
         SFTPOut[📁 SFTP Out]
+        ClientAPI[🌐 Внешний клиент]
+        AdminUI[👨‍💻 Admin UI]
     end
 
     LB[Load Balancer] --> API[API Gateway]
@@ -354,10 +355,21 @@ graph TB
         Receiver --> Validator[Validator & Classifier]
     end
 
+    %% API Gateway: явные связи с внутренними компонентами
+    ClientAPI --> API
+    AdminUI --> API
+    API --> DocAPI[Document API]
+    API --> TaskAPI[Task Management API]
+    API --> ConfigAPI[Routing Config API]
+    
+    DocAPI --> Receiver
+    TaskAPI --> RouteEngine[Routing Engine]
+    ConfigAPI --> RouteEngine
+
     Validator --> Kafka{Kafka}
     
     subgraph "Обработка"
-        Kafka --> RouteEngine[Routing Engine]
+        Kafka --> RouteEngine
         RouteEngine --> Workers[Task Workers Pool]
         Workers --> Crypto[Crypto Service<br/>Sign & Encrypt]
         Workers --> Archive[Archive Service]
@@ -385,20 +397,46 @@ sequenceDiagram
     participant Client
     participant API
     participant Kafka
+    participant Router
     participant Worker
+    participant Crypto and Archive
     participant Storage
 
-    Client->>API: POST /documents
-    API->>API: Validate + idempotency_key
-    API->>Storage: Save file (S3)
+    Client->>API: POST /documents {file, idempotency_key}
+    API->>API: Validate + check idempotency
+    API->>Storage: Save raw file
     API->>Kafka: Publish document.incoming
-    API-->>Client: 202 Accepted
+    API-->>Client: 202 Accepted {task_id}
     
-    Kafka->>Worker: Consume task
-    Worker->>Worker: Process (sign/encrypt/archive)
-    Worker->>Storage: Save result
-    Worker->>Kafka: Publish events.history
-    Worker->>Worker: Send via email/SFTP
+    Kafka->>Router: Consume
+    Router->>Router: Build operation plan
+    Router->>Kafka: Publish task.ready {ops: [SIGN?, ENC?, ARC?]}
+    
+    Kafka->>Worker: Consume task.ready
+    Worker->>Worker: Status: MESSAGE_PREPARED
+    
+    opt SIGN required
+        Worker->>Crypto and Archive: SIGN(payload, key_ref)
+        Crypto and Archive-->>Worker: signed_payload
+    end
+    
+    opt ENC required
+        Worker->>Crypto: ENCRYPT(payload, pubkey)
+        Crypto and Archive-->>Worker: encrypted_payload
+    end
+    
+    opt ARCHIVE required
+        Worker->>Crypto and Archive: ARCHIVE(payload, split=true)
+        Crypto and Archive-->>Worker: archive.zip[.001, .002...]
+    end
+    
+    Worker->>Storage: Save processed result
+    Worker->>Kafka: Publish events.history {PREPARED}
+    
+    Worker->>Worker: Send via Email/SFTP
+    Worker->>Kafka: Publish events.history {SENT}
+    Worker->>Storage: Move to cold tier (Glacier)
+    Worker->>Kafka: Publish events.history {SUCCEEDED}
 ```
 ### Масштабирование и отказоустойчивость
 
@@ -406,6 +444,10 @@ RPO/RTO: 5 минут /
 
 ### Безопасность
 
+    **Единое управление ключами**:
+       - Приватные ключи для подписи хранятся в HashiCorp Vault с доступом только для этого сервиса.
+       - Публичные ключи получателей кэшируются в Redis с TTL 1 час (вспомогательное использование).
+       - Ротация ключей выполняется централизованно через Vault, без перезапуска сервисов.
     In-transit: TLS 1.3, mTLS между сервисами
     At-rest: TDE для PostgreSQL, SSE-KMS для S3
     Secrets: HashiCorp Vault с ротацией ключей
@@ -501,6 +543,10 @@ stateDiagram-v2
     5. **Сборка томов**: При получении многотомного архива система ожидает все части (`COLLECTING`), затем собирает исходный файл (`REASSEMBLED`) и запускает повторный маршрут.
     6. **Обработка ошибок**: При сбоях документ переходит в `FAILED`, система выполняет retry с exponential backoff. После исчерпания попыток — DLQ.
     7. **Финализация**: Успешная доставка → статус `SENT`, затем архивирование в холодное хранилище (`ARCHIVED`).
+#### Dead Letter Queue (DLQ)
+- **Реализация:**
+    1. **Kafka Dead Letter Topic** (`tasks.dlq`) - сюда публикуются сообщения, которые не удалось обработать после исчерпания лимита повторных попыток (по умолчанию: 3 retry с exponential backoff). Формат сообщения включает: исходный payload, metadata об ошибках (`error_code`, `error_message`, `retry_count`, `last_attempt_timestamp`), correlation_id для трассировки. Потребитель: сервис `DLQ-Handler`, отвечающий за алертинг и возможность ручного перезапуска задач.
+    2. **PostgreSQL таблица** `dead_letter_tasks` — долгосрочный аудит и ручной разбор через Admin UI
 
 #### Приём и регистрация документа
 
