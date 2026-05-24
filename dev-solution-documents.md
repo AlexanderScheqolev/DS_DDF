@@ -290,7 +290,10 @@ erDiagram
 ```
 
 ### Идемпотентность и дедупликация
-Система предотвращает дублирование обработки через явные ключи идемпотентности на всех уровнях: (1) при приёме документа — по явному idempotency_key, передаваемому клиентом (или генерируемому из детерминированных атрибутов: SHA256(sender_id + channel + external_reference_id)); (2) при выполнении операций — через idempotency_key задачи и атомарную вставку INSERT ... ON CONFLICT; (3) при отправке — по уникальному ключу (channel_id, recipient, message_hash). Это гарантирует, что каждый документ и каждая операция будут обработаны ровно один раз, даже при повторных запросах или сбоях сети.
+- **Система предотвращает дублирование обработки через явные ключи идемпотентности на всех уровнях:**
+-  При приёме документа — по явному ключу идемпотентности idempotency_key, передаваемому клиентом в заголовке запроса. Если ключ не предоставлен, запрос отклоняется с ошибкой 400 Bad Request.;
+-  При выполнении операций — через idempotency_key задачи и атомарную вставку INSERT ... ON CONFLICT;
+-  При отправке — по уникальному ключу. Это гарантирует, что каждый документ и каждая операция будут обработаны ровно один раз, даже при повторных запросах или сбоях сети.
 
 Пример  обработки документа с идемпотентностью.
 ```mermaid
@@ -301,16 +304,16 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Queue as Kafka
 
-    Client->>API: POST /documents (file, metadata, Idempotency-Key)
+    Client->>API: POST /documents (file, metadata, Idempotency-Key: abc123)
     API->>DocSvc: Validate & process document
     
-    DocSvc->>DB: BEGIN TRANSACTION
-    DocSvc->>DB: INSERT INTO document (...)
-    DocSvc->>DB: ON CONFLICT (idempotency_key) DO UPDATE...
+    DocSvc->>DB: BEGIN
+    DocSvc->>DB: INSERT INTO documents (idempotency_key, ...) 
+    DocSvc->>DB: ON CONFLICT (idempotency_key) DO UPDATE SET last_seen=now()
     
-    alt Document is duplicate
-        DB-->>DocSvc: Return existing document_id & status
-        DocSvc-->>API: 200 OK (cached response)
+    alt Document already processed (idempotency_key exists)
+        DB-->>DocSvc: Return existing document_id, status
+        DocSvc-->>API: 200 OK 
         API-->>Client: Return previous result
     else New document
         DocSvc->>DB: COMMIT
@@ -369,10 +372,18 @@ graph TB
     Validator --> Kafka{Kafka}
     
     subgraph "Обработка"
-        Kafka --> RouteEngine
+        Kafka --> RouteEngine[Routing Engine]
         RouteEngine --> Workers[Task Workers Pool]
-        Workers --> Crypto[Crypto Service<br/>Sign & Encrypt]
+        
+        subgraph "Crypto Operations"
+            Workers --> SignWorker[Sign Worker]
+            Workers --> EncryptWorker[Encrypt Worker]
+        end
+        
         Workers --> Archive[Archive Service]
+        
+        SignWorker -.-> CryptoDB[(Crypto Keys DB)]
+        EncryptWorker -.-> CryptoDB
     end
 
     subgraph "Отправка"
@@ -446,7 +457,6 @@ RPO/RTO: 5 минут /
 
     Единое управление ключами:
        - Приватные ключи для подписи хранятся в HashiCorp Vault с доступом только для этого сервиса.
-       - Публичные ключи получателей кэшируются в Redis с TTL 1 час (вспомогательное использование).
        - Ротация ключей выполняется централизованно через Vault, без перезапуска сервисов.
     In-transit: TLS 1.3, mTLS между сервисами
     At-rest: TDE для PostgreSQL, SSE-KMS для S3
@@ -554,7 +564,10 @@ stateDiagram-v2
 - **Поток:**
     1. Receiver извлекает файл и метаданные (отправитель, время, канал).
     2. Validator определяет MIME/тип, проверяет сигнатуру, вычисляет file_hash (SHA256).
-    3. Проверка идемпотентности: если hash + sender + timestamp уже существует, возвращается предыдущий результат.
+    3. Проверка идемпотентности: система ищет запись в таблице documents по уникальному полю idempotency_key. 
+        - Если ключ найден и документ уже обработан — возвращается предыдущий результат (статус 200 с существующим document_id).
+        - Если ключ найден, но обработка ещё в процессе — возвращается статус 202 с тем же correlation_id.
+        - Если ключ не найден — создаётся новая запись, документ ставится в очередь.
     4. Файл сохраняется в S3, запись создаётся в PostgreSQL (status=RECEIVED).
     5. В Kafka публикуется DocumentReceived.
 - **Результат:** Документ зарегистрирован, клиент получает 202 Accepted с document_id и correlation_id.
