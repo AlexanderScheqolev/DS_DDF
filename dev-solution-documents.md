@@ -300,7 +300,6 @@ sequenceDiagram
     participant API as API Gateway
     participant DocSvc as Document Service
     participant DB as PostgreSQL
-    participant Cache as Redis Cluster
     participant Queue as Kafka
 
     Client->>API: POST /documents (file, metadata, Idempotency-Key)
@@ -316,7 +315,6 @@ sequenceDiagram
         API-->>Client: Return previous result
     else New document
         DocSvc->>DB: COMMIT
-        DocSvc->>Cache: SET doc:status:{id} = RECEIVED (TTL)
         DocSvc->>Queue: Publish event: DOCUMENT_RECEIVED
         
         par Parallel processing
