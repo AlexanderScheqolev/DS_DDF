@@ -399,7 +399,7 @@ sequenceDiagram
     participant Kafka
     participant Router
     participant Worker
-    participant Crypto and Archive
+    participant Crypto Sign Archive
     participant Storage
 
     Client->>API: POST /documents {file, idempotency_key}
@@ -416,18 +416,18 @@ sequenceDiagram
     Worker->>Worker: Status: MESSAGE_PREPARED
     
     opt SIGN required
-        Worker->>Crypto and Archive: SIGN(payload, key_ref)
-        Crypto and Archive-->>Worker: signed_payload
+        Worker->>Crypto Sign Archive: SIGN(payload, key_ref)
+        Crypto Sign Archive-->>Worker: signed_payload
     end
     
     opt ENC required
         Worker->>Crypto: ENCRYPT(payload, pubkey)
-        Crypto and Archive-->>Worker: encrypted_payload
+        Crypto Sign Archive-->>Worker: encrypted_payload
     end
     
     opt ARCHIVE required
-        Worker->>Crypto and Archive: ARCHIVE(payload, split=true)
-        Crypto and Archive-->>Worker: archive.zip[.001, .002...]
+        Worker->>Crypto Sign Archive: ARCHIVE(payload, split=true)
+        Crypto Sign Archive-->>Worker: archive.zip[.001, .002...]
     end
     
     Worker->>Storage: Save processed result
