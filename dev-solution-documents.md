@@ -376,12 +376,11 @@ graph TB
 
     subgraph "Хранилища"
         DB[(PostgreSQL)]
-        Cache[(Redis)]
         Storage[(S3)]
         Analytics[(ClickHouse)]
     end
 
-    RouteEngine --> DB & Cache
+    RouteEngine --> DB
     Workers --> DB & Storage
     Workers -.-> Analytics
 ```
