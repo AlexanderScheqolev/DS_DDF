@@ -247,14 +247,13 @@ erDiagram
     
     %% Idempotency
     Document {
-        uuid document_id PK
-        string external_id
-        enum document_type
-        string file_hash "SHA256, dedup"
-        string idempotency_key "UNIQUE"
-        enum status
-        jsonb metadata
-    }
+    uuid document_id PK
+    string external_id
+    enum document_type
+    string idempotency_key "UNIQUE"
+    enum status
+    jsonb metadata
+}
     
     ProcessingTask {
         uuid task_id PK
@@ -292,8 +291,7 @@ erDiagram
 ```
 
 ### Идемпотентность и дедупликация
-Система предотвращает дублирование обработки на трёх уровнях: (1) при приёме документа — по комбинации file_hash + `sender_id`( + idempotency_key); (2) при выполнении операций — через idempotency_key и атомарную вставку INSERT ... ON CONFLICT; (3) при отправке — по уникальному ключу (channel_id, recipient, message_hash). Это гарантирует, что каждый документ и каждая операция будут обработаны ровно один раз, даже при повторных запросах или сбоях сети.
-При повторном обращении система возвращает результат предыдущего успешного выполнения, а не запускает обработку заново. Такой подход обеспечивает семантику «точно один раз» на бизнес-уровне, сохраняя устойчивость к ретраям и временной недоступности внешних каналов.
+Система предотвращает дублирование обработки через явные ключи идемпотентности на всех уровнях: (1) при приёме документа — по явному idempotency_key, передаваемому клиентом (или генерируемому из детерминированных атрибутов: SHA256(sender_id + channel + external_reference_id)); (2) при выполнении операций — через idempotency_key задачи и атомарную вставку INSERT ... ON CONFLICT; (3) при отправке — по уникальному ключу (channel_id, recipient, message_hash). Это гарантирует, что каждый документ и каждая операция будут обработаны ровно один раз, даже при повторных запросах или сбоях сети.
 
 Пример  обработки документа с идемпотентностью.
 ```mermaid
@@ -309,7 +307,7 @@ sequenceDiagram
     API->>DocSvc: Validate & process document
     
     DocSvc->>DB: BEGIN TRANSACTION
-    DocSvc->>DB: INSERT INTO document (...) 
+    DocSvc->>DB: INSERT INTO document (...)
     DocSvc->>DB: ON CONFLICT (idempotency_key) DO UPDATE...
     
     alt Document is duplicate
